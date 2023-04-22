@@ -165,6 +165,7 @@ class Trilogy
   }.freeze
 
   def initialize(options = {})
+    p [:trilogy_init, options]
     mysql_encoding = options[:encoding] || "utf8mb4"
     unless rb_encoding = MYSQL_TO_RUBY_ENCODINGS_MAP[mysql_encoding]
       raise ArgumentError, "Unknown or unsupported encoding: #{mysql_encoding}"
