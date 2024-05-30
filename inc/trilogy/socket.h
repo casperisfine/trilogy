@@ -72,6 +72,8 @@ typedef struct {
     TRILOGY_CAPABILITIES_t flags;
 
     size_t max_allowed_packet;
+
+    void *priv_data;
 } trilogy_sockopt_t;
 
 typedef struct trilogy_sock_t {
@@ -111,7 +113,9 @@ static inline int trilogy_sock_close(trilogy_sock_t *sock) { return sock->close_
 static inline int trilogy_sock_fd(trilogy_sock_t *sock) { return sock->fd_cb(sock); }
 
 trilogy_sock_t *trilogy_sock_new(const trilogy_sockopt_t *opts);
+trilogy_sock_t *trilogy_sock_new_fd(const trilogy_sockopt_t *opts, int fd);
 int trilogy_sock_resolve(trilogy_sock_t *raw);
+int trilogy_sock_configure(trilogy_sock_t *raw);
 int trilogy_sock_upgrade_ssl(trilogy_sock_t *raw);
 
 /* trilogy_sock_check - Verify if the socket is still alive and not disconnected.

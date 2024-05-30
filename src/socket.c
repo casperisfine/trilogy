@@ -342,6 +342,13 @@ trilogy_sock_t *trilogy_sock_new(const trilogy_sockopt_t *opts)
     return (trilogy_sock_t *)sock;
 }
 
+trilogy_sock_t *trilogy_sock_new_fd(const trilogy_sockopt_t *opts, int fd)
+{
+    struct trilogy_sock *sock = (struct trilogy_sock *)trilogy_sock_new(opts);
+    sock->fd = fd;
+    return (trilogy_sock_t *)sock;
+}
+
 int trilogy_sock_resolve(trilogy_sock_t *_sock)
 {
     struct trilogy_sock *sock = (struct trilogy_sock *)_sock;

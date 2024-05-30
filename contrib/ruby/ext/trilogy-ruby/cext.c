@@ -34,10 +34,29 @@ struct trilogy_ctx {
     VALUE encoding;
 };
 
+#ifdef HAVE_RB_GC_MARK_MOVABLE
+static void compact_trilogy(void *ptr)
+{
+    struct trilogy_ctx *ctx = (struct trilogy_ctx *)ptr;
+
+    ctx->encoding = rb_gc_location(ctx->encoding);
+    if (ctx->conn.socket) {
+        ctx->conn.socket->opts.priv_data = (void *)rb_gc_location((VALUE)ctx->conn.socket->opts.priv_data);
+    }
+}
+#else
+#define rb_gc_mark_movable rb_gc_mark
+#endif
+
 static void mark_trilogy(void *ptr)
 {
-    struct trilogy_ctx *ctx = ptr;
-    rb_gc_mark(ctx->encoding);
+    struct trilogy_ctx *ctx = (struct trilogy_ctx *)ptr;
+
+    rb_gc_mark_movable(ctx->encoding);
+
+    if (ctx->conn.socket) {
+        rb_gc_mark_movable((VALUE)ctx->conn.socket->opts.priv_data);
+    }
 }
 
 static void free_trilogy(void *ptr)
@@ -63,6 +82,9 @@ static const rb_data_type_t trilogy_data_type = {
         .dmark = mark_trilogy,
         .dfree = free_trilogy,
         .dsize = trilogy_memsize,
+#ifdef HAVE_RB_GC_MARK_MOVABLE
+        .dcompact = compact_trilogy,
+#endif
     },
     .flags = RUBY_TYPED_FREE_IMMEDIATELY | RUBY_TYPED_WB_PROTECTED
 };
@@ -294,42 +316,28 @@ static int _cb_ruby_wait(trilogy_sock_t *sock, trilogy_wait_t wait)
     return TRILOGY_OK;
 }
 
-struct nogvl_sock_args {
-    int rc;
-    trilogy_sock_t *sock;
-};
-
-static void *no_gvl_resolve(void *data)
+static int _cb_ruby_connect(trilogy_sock_t *_sock)
 {
-    struct nogvl_sock_args *args = data;
-    args->rc = trilogy_sock_resolve(args->sock);
-    return NULL;
+    // noop: we dit it all in Ruby-land
+    return TRILOGY_OK;
 }
 
-static int try_connect(struct trilogy_ctx *ctx, trilogy_handshake_t *handshake, const trilogy_sockopt_t *opts)
+static int try_connect(struct trilogy_ctx *ctx, int fd, trilogy_handshake_t *handshake, const trilogy_sockopt_t *opts)
 {
-    trilogy_sock_t *sock = trilogy_sock_new(opts);
+    trilogy_sock_t *sock = trilogy_sock_new_fd(opts, fd);
     if (sock == NULL) {
         return TRILOGY_ERR;
     }
 
-    struct nogvl_sock_args args = {.rc = 0, .sock = sock};
-
-    // Do the DNS resolving with the GVL unlocked. At this point all
-    // configuration data is copied and available to the trilogy socket.
-    rb_thread_call_without_gvl(no_gvl_resolve, (void *)&args, RUBY_UBF_IO, NULL);
-
-    int rc = args.rc;
-
-    if (rc != TRILOGY_OK) {
-        trilogy_sock_close(sock);
-        return rc;
-    }
-
-    /* replace the default wait callback with our GVL-aware callback so we can
-escape the GVL on each wait operation without going through call_without_gvl */
+    // replace the default wait callback with our GVL-aware callback so we can
+    // escape the GVL on each wait operation without going through call_without_gvl
     sock->wait_cb = _cb_ruby_wait;
-    rc = trilogy_connect_send_socket(&ctx->conn, sock);
+
+    // replace the default connect implementationt o be a noop, because we did
+    // the connection in Ruby-land.
+    sock->connect_cb = _cb_ruby_connect;
+
+    int rc = trilogy_connect_send_socket(&ctx->conn, sock);
     if (rc < 0) {
         trilogy_sock_close(sock);
         return rc;
@@ -446,10 +454,11 @@ static void authenticate(struct trilogy_ctx *ctx, trilogy_handshake_t *handshake
     }
 }
 
-static VALUE rb_trilogy_connect(VALUE self, VALUE encoding, VALUE charset, VALUE opts)
+static VALUE rb_trilogy_connect(VALUE self, VALUE fd, VALUE encoding, VALUE charset, VALUE opts)
 {
     struct trilogy_ctx *ctx = get_ctx(self);
     trilogy_sockopt_t connopt = {0};
+    connopt.priv_data = (void *)self;
     trilogy_handshake_t handshake;
     VALUE val;
 
@@ -601,7 +610,7 @@ static VALUE rb_trilogy_connect(VALUE self, VALUE encoding, VALUE charset, VALUE
         connopt.tls_max_version = NUM2INT(val);
     }
 
-    int rc = try_connect(ctx, &handshake, &connopt);
+    int rc = try_connect(ctx, NUM2INT(fd), &handshake, &connopt);
     if (rc != TRILOGY_OK) {
         if (connopt.path) {
             handle_trilogy_error(ctx, rc, "trilogy_connect - unable to connect to %s", connopt.path);
@@ -1136,7 +1145,7 @@ RUBY_FUNC_EXPORTED void Init_cext(void)
     VALUE Trilogy = rb_const_get(rb_cObject, rb_intern("Trilogy"));
     rb_define_alloc_func(Trilogy, allocate_trilogy);
 
-    rb_define_private_method(Trilogy, "_connect", rb_trilogy_connect, 3);
+    rb_define_private_method(Trilogy, "_connect", rb_trilogy_connect, 4);
     rb_define_method(Trilogy, "change_db", rb_trilogy_change_db, 1);
     rb_define_alias(Trilogy, "select_db", "change_db");
     rb_define_method(Trilogy, "query", rb_trilogy_query, 1);

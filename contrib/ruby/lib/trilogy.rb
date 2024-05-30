@@ -6,8 +6,17 @@ require "trilogy/result"
 require "trilogy/cext"
 require "trilogy/encoding"
 
+require "socket"
+require "io/nonblock"
+
 class Trilogy
+  DEFAULT_HOSTNAME = "127.0.0.1"
+  DEFAULT_PORT = 3306
+  SUPPORTS_RESOLV_TIMEOUT = Socket.method(:tcp).parameters.any? { |p| p.last == :resolv_timeout }
+
   def initialize(options = {})
+    options = options.dup
+    options[:host] = DEFAULT_HOSTNAME if !options[:host] && !options[:path]
     options[:port] = options[:port].to_i if options[:port]
     mysql_encoding = options[:encoding] || "utf8mb4"
     encoding = Trilogy::Encoding.find(mysql_encoding)
@@ -15,7 +24,54 @@ class Trilogy
     @connection_options = options
     @connected_host = nil
 
-    _connect(encoding, charset, options)
+    begin
+      @io = if options[:host]
+        # TODO: Use Socket.new to set sockopts before connect?
+        sock = if SUPPORTS_RESOLV_TIMEOUT
+          Socket.tcp(
+            options[:host],
+            options.fetch(:port, DEFAULT_PORT),
+            connect_timeout: options[:connect_timeout],
+            resolv_timeout: @connect_timeout,
+          )
+        else
+          Socket.tcp(
+            options[:host],
+            options.fetch(:port, DEFAULT_PORT),
+            connect_timeout: options[:connect_timeout],
+          )
+        end
+        sock.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_NODELAY, true)
+        sock
+      else
+        UNIXSocket.new(options[:path])
+      end
+    rescue Errno::ECONNREFUSED => error
+      raise Trilogy::BaseConnectionError, error.message
+    rescue Socket::ResolutionError
+      raise Trilogy::BaseConnectionError, "trilogy_connect - unable to connect to #{options[:host]}:#{options[:port]}: TRILOGY_DNS_ERROR"
+    rescue Errno::ETIMEDOUT => error
+      raise Trilogy::TimeoutError, error.message
+    end
+
+    if options.fetch(:keepalive_enabled, true)
+      @io.setsockopt(Socket::SOL_SOCKET, Socket::SO_KEEPALIVE, true)
+      if options[:keepalive_idle] && defined?(Socket::TCP_KEEPIDLE)
+        @io.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_KEEPIDLE, options[:keepalive_idle])
+      end
+
+      if options[:keepalive_interval] && defined?(Socket::TCP_KEEPINTVL)
+        @io.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_KEEPINTVL, options[:keepalive_interval])
+      end
+
+      if options[:keepalive_count] && defined?(Socket::TCP_KEEPCNT)
+        @io.setsockopt(Socket::IPPROTO_TCP, Socket::TCP_KEEPCNT, options[:keepalive_count])
+      end
+    end
+
+    @io.nonblock = true
+
+    _connect(@io.fileno, encoding, charset, options)
   end
 
   def connection_options
